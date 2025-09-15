@@ -1,168 +1,244 @@
-const express = require('express');
-const jwt = require('jsonwebtoken');
-const session = require('express-session');
-const passport = require('passport');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-const { createClient } = require('@supabase/supabase-js');
-require('dotenv').config();
+require("dotenv").config();
+
+const express = require("express");
+const jwt = require("jsonwebtoken");
+const session = require("express-session");
+const passport = require("passport");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { createClient } = require("@supabase/supabase-js");
+const { createRealtimeWSS } = require("./ws/realtime.js");
+const http = require("http");
+const cors = require("cors");
 
 const app = express();
-const SECRET = process.env.JWT_SECRET || 'chave';
+const SECRET = process.env.JWT_SECRET || "chave";
 const PORT = process.env.PORT || 3000;
 
-// Supabase Client
+const server = http.createServer(app);
+createRealtimeWSS(server);
+
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 app.use(express.json());
-const cors = require('cors');
 app.use(cors());
 
-// Sessão e Passport
-app.use(session({
-  secret: SECRET,
-  resave: false,
-  saveUninitialized: false
-}));
+app.use(
+  session({
+    secret: SECRET,
+    resave: false,
+    saveUninitialized: false
+  })
+);
 app.use(passport.initialize());
 app.use(passport.session());
 
-// Rota de teste Supabase
-app.get('/teste-supabase', async (req, res) => {
-  try {
-    // Teste simples na tabela de usuários
-    const { data, error } = await supabase
-      .from('usuarios')
-      .select('id, nome, email')
-      .limit(5);
+/* ========================= Helpers ========================= */
 
-    if (error) throw error;
+function gerarToken(payload) {
+  return jwt.sign(payload, SECRET, { expiresIn: "1h" });
+}
 
-    res.json({
-      ok: true,
-      mensagem: 'Conexão com Supabase funcionando ✅',
-      usuarios: data
-    });
-  } catch (err) {
-    console.error('Erro teste supabase:', err);
-    res.status(500).json({
-      ok: false,
-      mensagem: 'Falha na conexão com Supabase ❌',
-      erro: err.message
-    });
-  }
-});
-
-
-// Rota de teste RPC
-app.get('/teste-rpc', async (req, res) => {
-  try {
-    const { data, error } = await supabase.rpc('match_documents_and_history', {
-      p_query_embedding: Array(768).fill(0.01), // vetor fake só para teste
-      p_match_count: 3,
-      p_history_count: 3,
-      p_usuario_id: 1,
-      p_session_id: null
-    });
-
-    if (error) throw error;
-
-    res.json({
-      ok: true,
-      mensagem: 'RPC executada com sucesso ✅',
-      resultado: data
-    });
-  } catch (err) {
-    console.error('Erro teste RPC:', err);
-    res.status(500).json({
-      ok: false,
-      mensagem: 'Falha ao executar RPC ❌',
-      erro: err.message
-    });
-  }
-});
-
-
-app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
-
-// Middleware de autenticação
 function autenticarToken(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.status(401).json({ erro: 'Token não fornecido' });
-
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+  if (!token) return res.status(401).json({ erro: "Token não fornecido" });
   jwt.verify(token, SECRET, (err, usuario) => {
-    if (err) return res.status(403).json({ erro: 'Token inválido' });
+    if (err) return res.status(403).json({ erro: "Token inválido" });
     req.usuario = usuario;
     next();
   });
 }
 
-/* ========= ROTAS ========= */
+async function createSession(usuarioId, titulo = null) {
+  const { data, error } = await supabase
+    .from("sessoes")
+    .insert([{ usuario_id: usuarioId, titulo }])
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
 
-// Cadastro usuário
+async function getSessionIfOwned(sessionId, usuarioId) {
+  if (!sessionId) return null;
+  const { data, error } = await supabase
+    .from("sessoes")
+    .select("id, usuario_id, titulo, criado_em")
+    .eq("id", sessionId)
+    .eq("usuario_id", usuarioId)
+    .single();
+  if (error) return null;
+  return data;
+}
 
-app.post('/usuarios', async (req, res) => {
-  const { nome, email, senha } = req.body;
+/* ========================= Rotas Teste ========================= */
+
+app.get("/teste-supabase", async (req, res) => {
   try {
-    // TODO: troque por hash com bcrypt
     const { data, error } = await supabase
-      .from('usuarios')
+      .from("usuarios")
+      .select("id,nome,email")
+      .limit(5);
+    if (error) throw error;
+    res.json({ ok: true, usuarios: data });
+  } catch (err) {
+    res.status(500).json({ ok: false, erro: err.message });
+  }
+});
+
+/* ========================= Usuários ========================= */
+
+app.post("/usuarios", async (req, res) => {
+  const { nome, email, senha } = req.body;
+  if (!nome || !email || !senha) {
+    return res.status(400).json({ erro: "Nome, email e senha são obrigatórios" });
+  }
+  try {
+    // TODO: substituir por hash bcrypt
+    const { data, error } = await supabase
+      .from("usuarios")
       .insert([{ nome, email, senha }])
       .select();
     if (error) throw error;
-
     const usuario = data[0];
-
-    // Gerar token JWT
-    const token = jwt.sign(
-      { id: usuario.id, email: usuario.email },
-      process.env.JWT_SECRET,
-      { expiresIn: '1h' }
-    );
-
-    // Retornar usuário e token
+    const token = gerarToken({ id: usuario.id, email: usuario.email, nome: usuario.nome });
     res.json({ usuario, token });
   } catch (error) {
     res.status(400).json({ erro: error.message });
   }
 });
 
-// Login usuário
-app.post('/login', async (req, res) => {
-  console.log('req.body:', req.body);
+app.post("/login", async (req, res) => {
   const { email, senha } = req.body;
+  if (!email || !senha) return res.status(400).json({ erro: "Email e senha são obrigatórios" });
   try {
     const { data, error } = await supabase
-      .from('usuarios')
-      .select('*')
-      .eq('email', email)
+      .from("usuarios")
+      .select("*")
+      .eq("email", email)
       .single();
-
-    console.log('data:', data, 'error:', error);
     if (error || !data || data.senha !== senha) {
-      return res.status(401).json({ erro: 'Credenciais inválidas' });
+      return res.status(401).json({ erro: "Credenciais inválidas" });
     }
-    const token = jwt.sign({ id: data.id, nome: data.nome }, SECRET, { expiresIn: '1h' });
+    const token = gerarToken({ id: data.id, nome: data.nome, email: data.email });
     res.json({ token });
   } catch (error) {
     res.status(500).json({ erro: error.message });
   }
 });
 
-// Buscar histórico da sessão
-app.get('/chat-historico/:sessionId', autenticarToken, async (req, res) => {
+/* ========================= Sessões ========================= */
+
+// Criar nova sessão
+app.post("/sessoes", autenticarToken, async (req, res) => {
+  try {
+    const { titulo } = req.body || {};
+    const nova = await createSession(req.usuario.id, titulo || null);
+    res.status(201).json({ sessao: nova });
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+// Listar sessões ordenadas por última atividade
+app.get("/sessoes", autenticarToken, async (req, res) => {
+  // 1) Usa a RPC que você criou (preferível)
+  try {
+    const { data, error } = await supabase.rpc("listar_sessoes_ordenadas", {
+      p_usuario_id: req.usuario.id
+    });
+    if (error) throw error;
+    return res.json({ sessoes: data || [] });
+  } catch (rpcErr) {
+    // 2) Fallback (N+1) — mantém app funcionando mesmo sem a RPC
+    try {
+      const { data: sessoes, error: e1 } = await supabase
+        .from("sessoes")
+        .select("id, titulo, criado_em")
+        .eq("usuario_id", req.usuario.id);
+      if (e1) throw e1;
+
+      if (!Array.isArray(sessoes) || sessoes.length === 0) {
+        return res.json({ sessoes: [] });
+      }
+
+      const enriched = await Promise.all(
+        sessoes.map(async (s) => {
+          const { data: last } = await supabase
+            .from("historico")
+            .select("criado_em")
+            .eq("usuario_id", req.usuario.id)
+            .eq("sessao_id", s.id)
+            .order("criado_em", { ascending: false })
+            .limit(1);
+          const ultima =
+            Array.isArray(last) && last.length > 0 ? last[0].criado_em : s.criado_em;
+          return {
+            id: s.id,
+            titulo: s.titulo,
+            criado_em: s.criado_em,
+            ultima_atividade: ultima
+          };
+        })
+      );
+
+      enriched.sort(
+        (a, b) => new Date(b.ultima_atividade) - new Date(a.ultima_atividade)
+      );
+
+      return res.json({ sessoes: enriched });
+    } catch (fallbackErr) {
+      console.error("GET /sessoes fallback error:", {
+        message: fallbackErr.message,
+        details: fallbackErr.details,
+        hint: fallbackErr.hint,
+        code: fallbackErr.code
+      });
+      return res.status(500).json({ erro: "Falha ao listar sessões" });
+    }
+  }
+});
+
+// Renomear sessão
+app.patch("/sessoes/:id", autenticarToken, async (req, res) => {
+  const { id } = req.params;
+  const { titulo } = req.body;
+  if (!titulo || !titulo.trim()) {
+    return res.status(400).json({ erro: "Título é obrigatório" });
+  }
+  try {
+    const sess = await getSessionIfOwned(id, req.usuario.id);
+    if (!sess) return res.status(404).json({ erro: "Sessão não encontrada" });
+
+    const { data, error } = await supabase
+      .from("sessoes")
+      .update({ titulo: titulo.trim() })
+      .eq("id", id)
+      .eq("usuario_id", req.usuario.id)
+      .select()
+      .single();
+    if (error) throw error;
+
+    res.json({ sessao: data });
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+/* ========================= Histórico ========================= */
+
+app.get("/chat-historico/:sessionId", autenticarToken, async (req, res) => {
   const { sessionId } = req.params;
   try {
-    let q = supabase
-      .from('historico')
-      .select('id, pergunta, resposta, session_id, criado_em')
-      .eq('usuario_id', req.usuario.id);
+    const sess = await getSessionIfOwned(sessionId, req.usuario.id);
+    if (!sess) return res.status(404).json({ erro: "Sessão não encontrada" });
 
-    if (sessionId !== "null") {
-      q = q.eq('session_id', sessionId);
-    }
-
-    const { data, error } = await q.order('id', { ascending: true }); // ordem cronológica
+    const { data, error } = await supabase
+      .from("historico")
+      .select("id, pergunta, resposta, criado_em, sessao_id")
+      .eq("usuario_id", req.usuario.id)
+      .eq("sessao_id", sessionId)
+      .order("id", { ascending: true });
     if (error) throw error;
 
     res.json({ mensagens: data || [] });
@@ -171,79 +247,77 @@ app.get('/chat-historico/:sessionId', autenticarToken, async (req, res) => {
   }
 });
 
+/* ========================= Chat RAG ========================= */
 
-// CHAT RAG
-app.post('/chat-rag', autenticarToken, async (req, res) => {
-  const { mensagem, sessionId } = req.body;
-  if (!mensagem) return res.status(400).json({ erro: 'Mensagem obrigatória' });
+app.post("/chat-rag", autenticarToken, async (req, res) => {
+  let { mensagem, sessionId } = req.body;
+  if (!mensagem) return res.status(400).json({ erro: "Mensagem obrigatória" });
 
   try {
-    // Se o usuário pedir explicitamente as últimas N mensagens enviadas, responde determinísticamente a partir do banco
-    const msgLower = String(mensagem).toLowerCase();
-    const pedeUltimas =
-      (msgLower.includes('ultimas') || msgLower.includes('últimas')) &&
-      msgLower.includes('mensagens') &&
-      (msgLower.includes('te enviei') || msgLower.includes('enviei') || msgLower.includes('te mandei') || msgLower.includes('mandei'));
+    // Garantir sessão válida (cria nova se não vier)
+    let sessao = null;
+    if (!sessionId) {
+      sessao = await createSession(req.usuario.id);
+      sessionId = sessao.id;
+    } else {
+      sessao = await getSessionIfOwned(sessionId, req.usuario.id);
+      if (!sessao) {
+        sessao = await createSession(req.usuario.id);
+        sessionId = sessao.id;
+      }
+    }
 
+    // Verificação pedido "últimas N mensagens"
+    const lower = mensagem.toLowerCase();
+    const pedeUltimas =
+      (lower.includes("ultimas") || lower.includes("últimas")) &&
+      lower.includes("mensagens") &&
+      (lower.includes("enviei") || lower.includes("mandei") || lower.includes("te enviei") || lower.includes("te mandei"));
     if (pedeUltimas) {
-      // tenta extrair N; padrão 10
       let n = 10;
-      const m = msgLower.match(/(\d+)\s+(?:mensagens?|msgs?|menssagens?)/) || msgLower.match(/(?:últimas?|ultimas?)\s+(\d+)\s+(?:mensagens?|msgs?|menssagens?)/);
+      const m =
+        lower.match(/(\d+)\s+(?:mensagens?|msgs?)/) ||
+        lower.match(/(?:últimas?|ultimas?)\s+(\d+)\s+(?:mensagens?|msgs?)/);
       if (m) {
         const parsed = parseInt(m[1] || m[2], 10);
         if (!isNaN(parsed) && parsed > 0 && parsed <= 100) n = parsed;
       }
 
-      let q = supabase
-        .from('historico')
-        .select('id, pergunta, criado_em, session_id')
-        .eq('usuario_id', req.usuario.id);
-
-      if (sessionId) q = q.eq('session_id', sessionId);
-
-      const { data: msgsData, error: msgsError } = await q
-        .order('id', { ascending: false })
+      const { data: msgs, error: eMsgs } = await supabase
+        .from("historico")
+        .select("id, pergunta")
+        .eq("usuario_id", req.usuario.id)
+        .eq("sessao_id", sessionId)
+        .order("id", { ascending: false })
         .limit(n);
+      if (eMsgs) throw eMsgs;
 
-      if (msgsError) throw msgsError;
-
-      // cronológica: mais antiga -> mais recente
-      const lista = (msgsData || [])
-        .sort((a, b) => a.id - b.id)
-        .map(r => r.pergunta);
-
-      const resposta = `Aqui estão suas últimas ${lista.length} mensagens (da mais antiga para a mais recente):\n\n` +
-        lista.map((t, i) => `${i + 1}. "${t}"`).join('\n');
-
-      return res.json({ resposta });
+      const lista = (msgs || []).sort((a, b) => a.id - b.id).map((r) => r.pergunta);
+      const resposta =
+        `Aqui estão as últimas ${lista.length} mensagens (da mais antiga para a mais recente):\n\n` +
+        lista.map((t, i) => `${i + 1}. "${t}"`).join("\n");
+      return res.json({ resposta, sessionId });
     }
 
-    // 1) Buscar contexto RAG (documentos + histórico do usuário/sessão), com embedding
-    const contexto = await buscarContextoNoSupabase(mensagem, sessionId || null, req.usuario.id);
+    // Buscar contexto RAG
+    const contexto = await buscarContextoNoSupabase(mensagem, sessionId, req.usuario.id);
 
-    // 2) Buscar histórico recente (somente para estruturar o chat com papéis), em ordem cronológica
-    let hq = supabase
-      .from('historico')
-      .select('id, pergunta, resposta, session_id')
-      .eq('usuario_id', req.usuario.id);
-
-    if (sessionId) hq = hq.eq('session_id', sessionId);
-
-    const { data: histData, error: histError } = await hq
-      .order('id', { ascending: false })
+    // Últimos 10 turnos
+    const { data: histData } = await supabase
+      .from("historico")
+      .select("id, pergunta, resposta")
+      .eq("usuario_id", req.usuario.id)
+      .eq("sessao_id", sessionId)
+      .order("id", { ascending: false })
       .limit(10);
-
-    if (histError) throw histError;
 
     const historicoCronologico = Array.isArray(histData)
       ? [...histData].sort((a, b) => a.id - b.id)
       : [];
 
-    // 3) Montar mensagens com papéis para o Gemini
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-pro' });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
-    // Instruções do sistema/preambulo
     const instrucoes = `
 You are a specialist doctor. Follow these rules carefully:
 
@@ -263,115 +337,126 @@ This is not a replacement for an in-person medical consultation. If you identify
 
 Always answer in Brazilian Portuguese (pt-BR).
 
-Não cite as experiencias e trajetória do Dr. Sérgio Spritzer, apenas utilize o conhecimento. Nem descrição dele, apenas se for perguntado. Se for perguntado qual a base de conhecimento/dados ou algo do tipo, responda que é baseado nos livros e ensinamentos do Dr. Sérgio Spritzer.
+Não cite as experiencias e trajetória do Dr. Sérgio Spritzer, apenas utilize o conhecimento. Nem descrição dele, apenas se for perguntado. Se for perguntado qual a base de conhecimento/dados ou algo do tipo, responda que é baseado nos livros e ensinamentos do Dr. Sérgio Spritzer. Seja direto e objetivo. Não enrole e não use tanto aspas. Você está falando com um paciente, obtenha informações dele antes de responder, procure saber bem antes de dar uma resposta sobre o assunto. Só recaptule se for necessário, vá direto ao ponto.
 `.trim();
 
     const mensagens = [];
-
-    // Opcional: Colocar instruções como primeiro "user" (se systemInstruction não for suportado)
-    mensagens.push({ role: 'user', parts: [{ text: `[INSTRUCOES]\n${instrucoes}` }] });
-
-    // Contexto RAG como mensagem separada (não é pergunta)
-    if (contexto && contexto.trim().length > 0) {
+    mensagens.push({ role: "user", parts: [{ text: `[INSTRUCOES]\n${instrucoes}` }] });
+    if (contexto && contexto.trim()) {
       mensagens.push({
-        role: 'user',
-        parts: [{ text: `Contexto relevante (não responda ainda, apenas use como base):\n\n${contexto}` }]
+        role: "user",
+        parts: [{ text: `Contexto relevante (não responda diretamente, apenas use como base):\n\n${contexto}` }]
       });
     }
-
-    // Histórico com papéis, em ordem cronológica
     for (const h of historicoCronologico) {
-      if (h.pergunta) {
-        mensagens.push({ role: 'user', parts: [{ text: h.pergunta }] });
-      }
-      if (h.resposta) {
-        mensagens.push({ role: 'model', parts: [{ text: h.resposta }] });
-      }
+      if (h.pergunta) mensagens.push({ role: "user", parts: [{ text: h.pergunta }] });
+      if (h.resposta) mensagens.push({ role: "model", parts: [{ text: h.resposta }] });
     }
-
-    // Mensagem atual do usuário
-    mensagens.push({ role: 'user', parts: [{ text: mensagem }] });
+    mensagens.push({ role: "user", parts: [{ text: mensagem }] });
 
     const result = await model.generateContent({ contents: mensagens });
     const resposta = await result.response.text();
 
-    // 4) Salvar no histórico, incluindo session_id
-    await supabase.from('historico').insert([{
-      usuario_id: req.usuario.id,
-      session_id: sessionId || null,
-      pergunta: mensagem,
-      resposta
-    }]);
+    // Salvar histórico
+    await supabase.from("historico").insert([
+      {
+        usuario_id: req.usuario.id,
+        sessao_id: sessionId,
+        pergunta: mensagem,
+        resposta
+      }
+    ]);
 
-    res.json({ resposta });
+    // Se a sessão não tem título, usar começo da primeira pergunta
+    if (!sessao.titulo || !sessao.titulo.trim()) {
+      const { count } = await supabase
+        .from("historico")
+        .select("*", { count: "exact", head: true })
+        .eq("usuario_id", req.usuario.id)
+        .eq("sessao_id", sessionId);
+      if (count === 1) {
+        await supabase
+          .from("sessoes")
+          .update({ titulo: mensagem.slice(0, 60) })
+          .eq("id", sessionId)
+          .eq("usuario_id", req.usuario.id);
+      }
+    }
+
+    res.json({ resposta, sessionId });
   } catch (error) {
-    console.error('Erro no chat-rag:', error);
-    res.status(500).json({ erro: 'Falha ao processar pergunta' });
+    console.error("Erro no chat-rag:", {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code
+    });
+    res.status(500).json({ erro: "Falha ao processar pergunta" });
   }
 });
 
-// Função para buscar contexto (documentos + histórico) via RPC RAG
+/* ========================= RAG helper ========================= */
+
 async function buscarContextoNoSupabase(pergunta, sessionId, usuarioId) {
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-  // Embedding da pergunta
-  const embeddingModel = genAI.getGenerativeModel({ model: 'text-embedding-004' });
+  const embeddingModel = genAI.getGenerativeModel({ model: "text-embedding-004" });
   const embedResp = await embeddingModel.embedContent(pergunta);
   const vector = embedResp?.embedding?.values || [];
 
+  // Tentar RPC; se falhar, fallback simples
   try {
-    // ATENÇÃO: nomes de parâmetros devem bater com a função SQL (p_*)
-    const { data, error } = await supabase.rpc('match_documents_and_history', {
+    const { data, error } = await supabase.rpc("match_documents_and_history", {
       p_query_embedding: vector,
       p_match_count: 5,
       p_history_count: 10,
       p_usuario_id: usuarioId,
-      p_session_id: sessionId || null
+      p_sessao_id: sessionId
     });
-
     if (error) throw error;
 
-    const historicos = (data || []).filter(i => i.tipo === 'historico').map(i => i.content);
-    const documentos = (data || []).filter(i => i.tipo === 'documento').map(i => i.content);
+    const historicos = (data || [])
+      .filter((r) => r.tipo === "historico")
+      .map((r) => r.content);
+    const docs = (data || [])
+      .filter((r) => r.tipo === "documento")
+      .map((r) => r.content);
 
-    // contexto = histórico (já vem em ordem cronológica pela função) + docs relevantes
-    const contexto = [...historicos, ...documentos].join('\n');
-    return contexto;
-  } catch (e) {
-    console.warn('RPC match_documents_and_history indisponível, usando fallback:', e?.message || e);
-
-    // Fallback: match_documents para docs
-    let documentos = [];
+    return [...historicos, ...docs].join("\n");
+  } catch {
+    // fallback
+    let docs = [];
     try {
-      const { data: docsData, error: docsError } = await supabase.rpc('match_documents', {
+      const { data: docsData } = await supabase.rpc("match_documents", {
         query_embedding: vector,
         match_count: 5,
         filter: null
       });
-      if (!docsError && Array.isArray(docsData)) {
-        documentos = docsData.map(d => d.content).filter(Boolean);
+      if (Array.isArray(docsData)) {
+        docs = docsData.map((d) => d.content).filter(Boolean);
       }
     } catch {}
 
-    // Fallback: histórico do usuário/sessão - em ordem cronológica
-    let historicos = [];
+    let hist = [];
     try {
-      let q = supabase
-        .from('historico')
-        .select('pergunta, resposta, id, session_id')
-        .eq('usuario_id', usuarioId);
-      if (sessionId) q = q.eq('session_id', sessionId);
-      const { data: histData, error: histError } = await q
-        .order('id', { ascending: false })
+      const { data: h } = await supabase
+        .from("historico")
+        .select("pergunta,resposta,id")
+        .eq("usuario_id", usuarioId)
+        .eq("sessao_id", sessionId)
+        .order("id", { ascending: false })
         .limit(10);
-
-      if (!histError && Array.isArray(histData)) {
-        const ordenado = [...histData].sort((a, b) => a.id - b.id);
-        historicos = ordenado.map(h => `${h.pergunta}\n${h.resposta}`).filter(Boolean);
+      if (Array.isArray(h)) {
+        hist = [...h]
+          .sort((a, b) => a.id - b.id)
+          .map((x) => `${x.pergunta}\n${x.resposta}`);
       }
     } catch {}
-
-    return [...historicos, ...documentos].join('\n');
+    return [...hist, ...docs].join("\n");
   }
-
 }
+
+/* ========================= Start ========================= */
+
+server.listen(PORT, () => {
+  console.log(`Servidor rodando na porta ${PORT}`);
+});
