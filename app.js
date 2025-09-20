@@ -4,7 +4,7 @@ const express = require("express");
 const jwt = require("jsonwebtoken");
 const session = require("express-session");
 const passport = require("passport");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const OpenAI = require("openai");
 const { createClient } = require("@supabase/supabase-js");
 const { createRealtimeWSS } = require("./ws/realtime.js");
 const http = require("http");
@@ -18,6 +18,9 @@ const server = http.createServer(app);
 createRealtimeWSS(server);
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 app.use(express.json());
 app.use(cors());
@@ -124,6 +127,22 @@ app.post("/login", async (req, res) => {
     res.json({ token });
   } catch (error) {
     res.status(500).json({ erro: error.message });
+  }
+});
+
+app.get("/me", autenticarToken, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("usuarios")
+      .select("id,nome,email")
+      .eq("id", req.usuario.id)
+      .single();
+    if (error || !data) {
+      return res.status(404).json({ erro: "Usuário não encontrado" });
+    }
+    return res.json(data);
+  } catch (err) {
+    return res.status(500).json({ erro: "Falha ao obter usuário" });
   }
 });
 
@@ -315,9 +334,7 @@ app.post("/chat-rag", autenticarToken, async (req, res) => {
       ? [...histData].sort((a, b) => a.id - b.id)
       : [];
 
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-
+  
     const instrucoes = `
 You are a specialist doctor. Follow these rules carefully:
 
@@ -354,8 +371,16 @@ Não cite as experiencias e trajetória do Dr. Sérgio Spritzer, apenas utilize 
     }
     mensagens.push({ role: "user", parts: [{ text: mensagem }] });
 
-    const result = await model.generateContent({ contents: mensagens });
-    const resposta = await result.response.text();
+   const completion = await openai.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages: mensagens.map(m => ({
+    role: m.role === "model" ? "assistant" : "user",
+    content: m.parts.map(p => p.text).join("\n")
+  }))
+});
+
+const resposta = completion.choices[0].message.content;
+
 
     // Salvar histórico
     await supabase.from("historico").insert([
@@ -398,32 +423,39 @@ Não cite as experiencias e trajetória do Dr. Sérgio Spritzer, apenas utilize 
 /* ========================= RAG helper ========================= */
 
 async function buscarContextoNoSupabase(pergunta, sessionId, usuarioId) {
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-  const embeddingModel = genAI.getGenerativeModel({ model: "text-embedding-004" });
-  const embedResp = await embeddingModel.embedContent(pergunta);
-  const vector = embedResp?.embedding?.values || [];
-
-  // Tentar RPC; se falhar, fallback simples
   try {
-    const { data, error } = await supabase.rpc("match_documents_and_history", {
-      p_query_embedding: vector,
-      p_match_count: 5,
-      p_history_count: 10,
-      p_usuario_id: usuarioId,
-      p_sessao_id: sessionId
+
+    const embeddingResp = await openai.embeddings.create({
+      model: "text-embedding-3-small", // pode trocar por -large se quiser mais qualidade
+      input: pergunta
     });
-    if (error) throw error;
 
-    const historicos = (data || [])
-      .filter((r) => r.tipo === "historico")
-      .map((r) => r.content);
-    const docs = (data || [])
-      .filter((r) => r.tipo === "documento")
-      .map((r) => r.content);
+    const vector = embeddingResp.data[0].embedding;
 
-    return [...historicos, ...docs].join("\n");
-  } catch {
-    // fallback
+    // 2) Tentar via RPC que junta docs + histórico
+    try {
+      const { data, error } = await supabase.rpc("match_documents_and_history", {
+        p_query_embedding: vector,
+        p_match_count: 5,
+        p_history_count: 10,
+        p_usuario_id: usuarioId,
+        p_sessao_id: sessionId
+      });
+      if (error) throw error;
+
+      const historicos = (data || [])
+        .filter((r) => r.tipo === "historico")
+        .map((r) => r.content);
+      const docs = (data || [])
+        .filter((r) => r.tipo === "documento")
+        .map((r) => r.content);
+
+      return [...historicos, ...docs].join("\n");
+    } catch (rpcErr) {
+      console.warn("RPC match_documents_and_history falhou, usando fallback:", rpcErr.message);
+    }
+
+    // 3) Fallback → busca docs e histórico separadamente
     let docs = [];
     try {
       const { data: docsData } = await supabase.rpc("match_documents", {
@@ -451,9 +483,14 @@ async function buscarContextoNoSupabase(pergunta, sessionId, usuarioId) {
           .map((x) => `${x.pergunta}\n${x.resposta}`);
       }
     } catch {}
+
     return [...hist, ...docs].join("\n");
+  } catch (err) {
+    console.error("Erro em buscarContextoNoSupabase:", err.message);
+    return "";
   }
 }
+
 
 /* ========================= Start ========================= */
 
