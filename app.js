@@ -9,6 +9,7 @@ const { createClient } = require("@supabase/supabase-js");
 const { createRealtimeWSS } = require("./ws/realtime.js");
 const http = require("http");
 const cors = require("cors");
+const { verifyGoogleIdToken } = require("./googleToken.js"); 
 
 const app = express();
 const SECRET = process.env.JWT_SECRET || "chave";
@@ -23,7 +24,10 @@ const openai = new OpenAI({
 });
 
 app.use(express.json());
-app.use(cors());
+app.use(cors({
+  origin: process.env.FRONT_URL || "http://localhost:5173",
+  credentials: true
+}));
 
 app.use(
   session({
@@ -34,8 +38,6 @@ app.use(
 );
 app.use(passport.initialize());
 app.use(passport.session());
-
-/* ========================= Helpers ========================= */
 
 function gerarToken(payload) {
   return jwt.sign(payload, SECRET, { expiresIn: "1h" });
@@ -74,8 +76,7 @@ async function getSessionIfOwned(sessionId, usuarioId) {
   return data;
 }
 
-/* ========================= Rotas Teste ========================= */
-
+// ===== Teste =====
 app.get("/teste-supabase", async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -89,18 +90,16 @@ app.get("/teste-supabase", async (req, res) => {
   }
 });
 
-/* ========================= Usuários ========================= */
-
+// ===== Usuários Local =====
 app.post("/usuarios", async (req, res) => {
   const { nome, email, senha } = req.body;
   if (!nome || !email || !senha) {
     return res.status(400).json({ erro: "Nome, email e senha são obrigatórios" });
   }
   try {
-    // TODO: substituir por hash bcrypt
     const { data, error } = await supabase
       .from("usuarios")
-      .insert([{ nome, email, senha }])
+      .insert([{ nome, email, senha }]) // TODO: trocar para hash bcrypt
       .select();
     if (error) throw error;
     const usuario = data[0];
@@ -130,11 +129,100 @@ app.post("/login", async (req, res) => {
   }
 });
 
+app.post("/auth/google-token", async (req, res) => {
+  try {
+    const { credential } = req.body;
+    if (!credential) {
+      return res.status(400).json({ erro: "Credential (ID token) é obrigatório" });
+    }
+
+    const payload = await verifyGoogleIdToken(credential);
+    const { sub: googleSub, email, name, picture, email_verified } = payload;
+
+    if (!email) {
+      return res.status(400).json({ erro: "Email não disponível" });
+    }
+    if (email_verified === false) {
+      return res.status(403).json({ erro: "Email Google não verificado" });
+    }
+
+    let { data: userByGoogle } = await supabase
+      .from("usuarios")
+      .select("*")
+      .eq("google_id", googleSub)
+      .single();
+
+    if (!userByGoogle) {
+      const { data: userByEmail, error: userByEmailError } = await supabase
+  .from("usuarios")
+  .select("*")
+  .ilike("email", email)
+  .single();
+
+if (userByEmailError) {
+  console.log("Usuário por email não encontrado ou erro:", userByEmailError.message);
+}
+
+
+      if (userByEmail && !userByEmail.google_id) {
+        const { data: updated, error: upErr } = await supabase
+          .from("usuarios")
+          .update({
+            google_id: googleSub,
+            provider: "google",
+            nome: userByEmail.nome || name || "Usuário",
+            avatar_url: picture || userByEmail.avatar_url
+          })
+          .eq("id", userByEmail.id)
+          .select()
+          .single();
+        if (upErr) throw upErr;
+        userByGoogle = updated;
+      } else if (!userByEmail) {
+        const { data: created, error: createErr } = await supabase
+          .from("usuarios")
+          .insert([{
+            nome: name || "Usuário",
+            email,
+            senha: null,
+            google_id: googleSub,
+            provider: "google",
+            avatar_url: picture || null
+          }])
+          .select()
+          .single();
+        if (createErr) throw createErr;
+        userByGoogle = created;
+      }
+    }
+
+    const token = gerarToken({
+      id: userByGoogle.id,
+      email: userByGoogle.email,
+      nome: userByGoogle.nome
+    });
+
+    res.json({
+      token,
+      usuario: {
+        id: userByGoogle.id,
+        nome: userByGoogle.nome,
+        email: userByGoogle.email,
+        avatar_url: userByGoogle.avatar_url,
+        provider: userByGoogle.provider
+      }
+    });
+  } catch (err) {
+    console.error("Erro /auth/google-token:", err);
+    res.status(401).json({ erro: "Token Google inválido" });
+  }
+});
+
 app.get("/me", autenticarToken, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("usuarios")
-      .select("id,nome,email")
+      .select("id,nome,email,avatar_url,provider")
       .eq("id", req.usuario.id)
       .single();
     if (error || !data) {
@@ -357,7 +445,7 @@ Always answer in Brazilian Portuguese (pt-BR).
 Não cite as experiencias e trajetória do Dr. Sérgio Spritzer, apenas utilize o conhecimento. Nem descrição dele, apenas se for perguntado. Se for perguntado qual a base de conhecimento/dados ou algo do tipo, responda que é baseado nos livros e ensinamentos do Dr. Sérgio Spritzer. Seja direto e objetivo. Não enrole e não use tanto aspas. Você está falando com um paciente, obtenha informações dele antes de responder, procure saber bem antes de dar uma resposta sobre o assunto. Só recaptule se for necessário, vá direto ao ponto.
 Answer **only** based on the knowledge from Dr. Sérgio Spritzer’s books, teachings, and the provided context. 
 If the answer is not contained in these sources, respond: "Desculpe, não sei responder a isso." 
-Do **not** invent information or speculate.
+Do **not** invent information or speculate. Você só sabe assuntos relacionados a neurologia, distúrbios de comunicação, inteligência humana, psicanálise, PNL, hipnose e interações humanas.
 
 `.trim();
 
