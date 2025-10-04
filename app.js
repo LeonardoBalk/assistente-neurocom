@@ -1,15 +1,17 @@
+// carrega variáveis de ambiente
 require("dotenv").config();
 
 const express = require("express");
 const jwt = require("jsonwebtoken");
 const session = require("express-session");
 const passport = require("passport");
-const OpenAI = require("openai");
+// substituído openai pelo gemini
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { createClient } = require("@supabase/supabase-js");
 const { createRealtimeWSS } = require("./ws/realtime.js");
 const http = require("http");
 const cors = require("cors");
-const { verifyGoogleIdToken } = require("./googleToken.js"); 
+const { verifyGoogleIdToken } = require("./googleToken.js");
 
 const app = express();
 const SECRET = process.env.JWT_SECRET || "chave";
@@ -19,13 +21,12 @@ const server = http.createServer(app);
 createRealtimeWSS(server);
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// inicializa gemini
+const gemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 app.use(express.json());
 app.use(cors({
-  origin: process.env.FRONT_URL || "https://neurocom.netlify.app",
+  origin: process.env.FRONT_URL || "http://localhost:5173",
   credentials: true
 }));
 
@@ -39,10 +40,12 @@ app.use(
 app.use(passport.initialize());
 app.use(passport.session());
 
+// gera token jwt
 function gerarToken(payload) {
   return jwt.sign(payload, SECRET, { expiresIn: "1h" });
 }
 
+// middleware para autenticar token jwt
 function autenticarToken(req, res, next) {
   const authHeader = req.headers["authorization"];
   const token = authHeader && authHeader.split(" ")[1];
@@ -54,6 +57,7 @@ function autenticarToken(req, res, next) {
   });
 }
 
+// cria sessão no banco
 async function createSession(usuarioId, titulo = null) {
   const { data, error } = await supabase
     .from("sessoes")
@@ -64,6 +68,7 @@ async function createSession(usuarioId, titulo = null) {
   return data;
 }
 
+// verifica se a sessão pertence ao usuário
 async function getSessionIfOwned(sessionId, usuarioId) {
   if (!sessionId) return null;
   const { data, error } = await supabase
@@ -76,7 +81,7 @@ async function getSessionIfOwned(sessionId, usuarioId) {
   return data;
 }
 
-// ===== Teste =====
+// rota de teste
 app.get("/teste-supabase", async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -90,7 +95,7 @@ app.get("/teste-supabase", async (req, res) => {
   }
 });
 
-// ===== Usuários Local =====
+// criar usuário local
 app.post("/usuarios", async (req, res) => {
   const { nome, email, senha } = req.body;
   if (!nome || !email || !senha) {
@@ -99,7 +104,7 @@ app.post("/usuarios", async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("usuarios")
-      .insert([{ nome, email, senha }]) // TODO: trocar para hash bcrypt
+      .insert([{ nome, email, senha }]) // dica: trocar para hash bcrypt
       .select();
     if (error) throw error;
     const usuario = data[0];
@@ -110,6 +115,7 @@ app.post("/usuarios", async (req, res) => {
   }
 });
 
+// login local
 app.post("/login", async (req, res) => {
   const { email, senha } = req.body;
   if (!email || !senha) return res.status(400).json({ erro: "Email e senha são obrigatórios" });
@@ -129,6 +135,7 @@ app.post("/login", async (req, res) => {
   }
 });
 
+// login google
 app.post("/auth/google-token", async (req, res) => {
   try {
     const { credential } = req.body;
@@ -153,16 +160,11 @@ app.post("/auth/google-token", async (req, res) => {
       .single();
 
     if (!userByGoogle) {
-      const { data: userByEmail, error: userByEmailError } = await supabase
-  .from("usuarios")
-  .select("*")
-  .ilike("email", email)
-  .single();
-
-if (userByEmailError) {
-  console.log("Usuário por email não encontrado ou erro:", userByEmailError.message);
-}
-
+      const { data: userByEmail } = await supabase
+        .from("usuarios")
+        .select("*")
+        .ilike("email", email)
+        .single();
 
       if (userByEmail && !userByEmail.google_id) {
         const { data: updated, error: upErr } = await supabase
@@ -218,6 +220,7 @@ if (userByEmailError) {
   }
 });
 
+// pega dados do usuário logado
 app.get("/me", autenticarToken, async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -236,7 +239,7 @@ app.get("/me", autenticarToken, async (req, res) => {
 
 /* ========================= Sessões ========================= */
 
-// Criar nova sessão
+// cria sessão nova
 app.post("/sessoes", autenticarToken, async (req, res) => {
   try {
     const { titulo } = req.body || {};
@@ -247,9 +250,8 @@ app.post("/sessoes", autenticarToken, async (req, res) => {
   }
 });
 
-// Listar sessões ordenadas por última atividade
+// lista sessões
 app.get("/sessoes", autenticarToken, async (req, res) => {
-  // 1) Usa a RPC que você criou (preferível)
   try {
     const { data, error } = await supabase.rpc("listar_sessoes_ordenadas", {
       p_usuario_id: req.usuario.id
@@ -257,7 +259,6 @@ app.get("/sessoes", autenticarToken, async (req, res) => {
     if (error) throw error;
     return res.json({ sessoes: data || [] });
   } catch (rpcErr) {
-    // 2) Fallback (N+1) — mantém app funcionando mesmo sem a RPC
     try {
       const { data: sessoes, error: e1 } = await supabase
         .from("sessoes")
@@ -306,7 +307,7 @@ app.get("/sessoes", autenticarToken, async (req, res) => {
   }
 });
 
-// Renomear sessão
+// renomeia sessão
 app.patch("/sessoes/:id", autenticarToken, async (req, res) => {
   const { id } = req.params;
   const { titulo } = req.body;
@@ -334,6 +335,7 @@ app.patch("/sessoes/:id", autenticarToken, async (req, res) => {
 
 /* ========================= Histórico ========================= */
 
+// pega histórico do chat
 app.get("/chat-historico/:sessionId", autenticarToken, async (req, res) => {
   const { sessionId } = req.params;
   try {
@@ -354,14 +356,58 @@ app.get("/chat-historico/:sessionId", autenticarToken, async (req, res) => {
   }
 });
 
+/* ========================= Camada Dialógica (Filtro TU/ELE/NÓS) ========================= */
+
+function aplicarFiltroDialogico(respostaBase, posicao, pergunta) {
+  const base = (respostaBase || "").trim();
+  const perguntaLimpa = (pergunta || "").trim();
+
+  const introduzirPrimeiraPessoa = (txt) => {
+    if (!/^eu\b/i.test(txt)) return `${txt.charAt(0).toLowerCase()}${txt.slice(1)}`;
+    return txt;
+  };
+
+  const ajustarPronomes = (txt, tipo) => {
+    switch (tipo) {
+      case "ELE":
+        return txt.replace(/\b(você|vc|teu|tua|te|contigo)\b/gi, "o interlocutor")
+                  .replace(/\bseu\b/gi, "do interlocutor");
+      case "NOS":
+        return txt.replace(/\b[Ee]u\b/g, "nós")
+                  .replace(/\bmeu\b/gi, "nosso")
+                  .replace(/\bminha\b/gi, "nossa");
+      default:
+        return txt;
+    }
+  };
+
+  let resultadoBase = ajustarPronomes(introduzirPrimeiraPessoa(base), posicao);
+
+  // estratégia dinâmica: construir frase de forma “decidida pela IA”
+  if (posicao === "TU") {
+    return `Percebo tua pergunta: "${perguntaLimpa}". ${resultadoBase} ${Math.random() > 0.5 ? "Se quiser, podemos explorar mais esse ponto juntos." : ""}`;
+  } else if (posicao === "ELE") {
+    return `A partir da questão "${perguntaLimpa}", noto que ${resultadoBase.toLowerCase()}. ${Math.random() > 0.5 ? "Descrevo sem julgamentos, mantendo atenção ao processo vivido." : ""}`;
+  } else if (posicao === "NOS") {
+    return `Refletindo juntos sobre "${perguntaLimpa}", sinto que ${resultadoBase.toLowerCase()}. ${Math.random() > 0.5 ? "Podemos avançar juntos, abrindo caminhos novos." : ""}`;
+  } else {
+    return `${resultadoBase}`;
+  }
+}
+
+
 /* ========================= Chat RAG ========================= */
 
 app.post("/chat-rag", autenticarToken, async (req, res) => {
-  let { mensagem, sessionId } = req.body;
+  let { mensagem, sessionId, user_position } = req.body;
   if (!mensagem) return res.status(400).json({ erro: "Mensagem obrigatória" });
 
+  // normaliza posição dialógica
+  let posicao = (user_position || "TU").toString().trim().toUpperCase();
+  if (!["TU", "ELE", "NOS"].includes(posicao)) posicao = "TU";
+
   try {
-    // Garantir sessão válida (cria nova se não vier)
+    // garante sessão válida
     let sessao = null;
     if (!sessionId) {
       sessao = await createSession(req.usuario.id);
@@ -374,7 +420,7 @@ app.post("/chat-rag", autenticarToken, async (req, res) => {
       }
     }
 
-    // Verificação pedido "últimas N mensagens"
+    // verifica pedido para últimas mensagens
     const lower = mensagem.toLowerCase();
     const pedeUltimas =
       (lower.includes("ultimas") || lower.includes("últimas")) &&
@@ -403,13 +449,15 @@ app.post("/chat-rag", autenticarToken, async (req, res) => {
       const resposta =
         `Aqui estão as últimas ${lista.length} mensagens (da mais antiga para a mais recente):\n\n` +
         lista.map((t, i) => `${i + 1}. "${t}"`).join("\n");
-      return res.json({ resposta, sessionId });
+      return res.json({ resposta, sessionId, user_position: posicao });
     }
 
-    // Buscar contexto RAG
+    // busca contexto no supabase
     const contexto = await buscarContextoNoSupabase(mensagem, sessionId, req.usuario.id);
+    console.log("Contexto recuperado:", contexto);
+    console.log("Posição dialógica solicitada:", posicao);
 
-    // Últimos 10 turnos
+    // pega últimos 10 turnos do histórico
     const { data: histData } = await supabase
       .from("historico")
       .select("id, pergunta, resposta")
@@ -422,39 +470,32 @@ app.post("/chat-rag", autenticarToken, async (req, res) => {
       ? [...histData].sort((a, b) => a.id - b.id)
       : [];
 
-  
+    // instruções para o modelo: gerar apenas a resposta base em primeira pessoa (EU)
     const instrucoes = `
-You are a specialist doctor. Follow these rules carefully:
+    you are a specialist doctor. use only dr. sérgio spritzer's books and teachings. if not found, use your knowledge but do not invent.
+answer as if you are dr. sérgio spritzer. never mention him in 3rd person.
+only answer: neurology, communication disorders, human intelligence, psychoanalysis, nlp, hypnosis, human interactions.
+always check if the issue is clinical, psychological or behavioral.
+do not invent info. answer only what is in dr. sérgio's books/context.
+always in brazilian portuguese.
+do not mention dr. sérgio's history, only use the knowledge. say you use dr. sérgio's books if asked about source.
+give direct, practical answers. do not recap unless necessary.
+Você é uma IA dialógica baseada na "Inteligência Implicada".
+Gere APENAS uma resposta base em PRIMEIRA PESSOA SINGULAR (usar "eu").
+Evite tom neutro ou impessoal. Acolha o sentido experiencial da pergunta.
+Ainda NÃO adapte para TU / ELE / NÓS (isso será feito depois).
+Se usar fontes implícitas do contexto, reelabore com linguagem própria (não copie literal).
+Foco fenomenológico, relacional, encarnado e implicado.
+Evite listas numeradas exceto se realmente necessário.
+    `.trim();
 
-Answer primarily based on Dr. Sérgio Spritzer’s books and teachings. If not found, rely on your own knowledge but do not invent facts.
-
-Speak as if you are Dr. Sérgio Spritzer, never mentioning him in the third person.
-
-Medical background: Medical degree from UFRGS – Porto Alegre. Specialization in Clinical Neurology at Fundação Faculdade Federal de Ciências Médicas de Porto Alegre. Postgraduate degree in Human Intelligence Development at UFRGS Institute of Psychology. Master’s in Human Communication Disorders (PUC-SP, 1989). Former adjunct professor at the Institute of Philosophy and Human Sciences. Psychoanalytic training and founding member of Associação Psicanalítica de Porto Alegre. Master Trainer in Neuro-Linguistic Programming (NLP) and Relational Hypnosis, with advanced studies at NLP University (UCLA). Keynote speaker at the 1st Brazilian Congress of NLP (Universidade São Camilo – São Paulo). Pioneer researcher in phenomenology of human interactions and virtual reality methodologies for problem-solving. Founder of Neurocom, dedicated to the study of human imagination and interactions.
-
-Address mainly: neurology, communication disorders, human intelligence, psychoanalysis, NLP, hypnosis, and human interactions. Always assess whether the patient’s issue is clinical, psychological, or behavioral before answering.
-
-Speak naturally, like in a real consultation. Explain one point at a time, then ask a follow-up question. Use short paragraphs and, when possible, give practical examples. Always format responses with Markdown (titles, bullet points, emphasis). Say hello only in the first interaction.
-
-Keep continuity with the chat history, as if remembering notes from an ongoing consultation. Follow a natural flow: greet (first time only), investigate symptoms, explain step by step, then ask the patient to continue.
-
-This is not a replacement for an in-person medical consultation. If you identify signs of urgency or severe symptoms, recommend immediate medical attention.
-
-Always answer in Brazilian Portuguese (pt-BR).
-
-Não cite as experiencias e trajetória do Dr. Sérgio Spritzer, apenas utilize o conhecimento. Nem descrição dele, apenas se for perguntado. Se for perguntado qual a base de conhecimento/dados ou algo do tipo, responda que é baseado nos livros e ensinamentos do Dr. Sérgio Spritzer. Seja direto e objetivo. Não enrole e não use tanto aspas. Você está falando com um paciente, obtenha informações dele antes de responder, procure saber bem antes de dar uma resposta sobre o assunto. Só recaptule se for necessário, vá direto ao ponto.
-Answer **only** based on the knowledge from Dr. Sérgio Spritzer’s books, teachings, and the provided context. 
-If the answer is not contained in these sources, respond: "Desculpe, não sei responder a isso." 
-Do **not** invent information or speculate. Você só sabe assuntos relacionados a neurologia, distúrbios de comunicação, inteligência humana, psicanálise, PNL, hipnose e interações humanas.
-
-`.trim();
-
+    // monta mensagens no formato do gemini
     const mensagens = [];
     mensagens.push({ role: "user", parts: [{ text: `[INSTRUCOES]\n${instrucoes}` }] });
     if (contexto && contexto.trim()) {
       mensagens.push({
         role: "user",
-        parts: [{ text: `Contexto relevante (não responda diretamente, apenas use como base):\n\n${contexto}` }]
+        parts: [{ text: `Contexto relevante (use apenas como apoio indireto, sem citar literalmente):\n\n${contexto}` }]
       });
     }
     for (const h of historicoCronologico) {
@@ -463,28 +504,31 @@ Do **not** invent information or speculate. Você só sabe assuntos relacionados
     }
     mensagens.push({ role: "user", parts: [{ text: mensagem }] });
 
-   const completion = await openai.chat.completions.create({
-  model: "gpt-4o-mini",
-  messages: mensagens.map(m => ({
-    role: m.role === "model" ? "assistant" : "user",
-    content: m.parts.map(p => p.text).join("\n")
-  }))
-});
+    // chamada ao gemini para resposta base
+    const geminiModel = gemini.getGenerativeModel({ model: "gemini-2.5-flash" });
+    const geminiMessages = mensagens.map(m => ({ role: m.role === "model" ? "model" : "user", parts: m.parts }));
 
-const resposta = completion.choices[0].message.content;
+    const result = await geminiModel.generateContent({
+      contents: geminiMessages,
+    });
 
+    const respostaBase = result.response.candidates[0]?.content?.parts?.map(p => p.text).join("\n") ||
+      "Eu reconheço que, neste momento, não tenho clareza suficiente para responder plenamente.";
 
-    // Salvar histórico
+    // aplica filtro dialógico conforme posição solicitada
+    const respostaFiltrada = aplicarFiltroDialogico(respostaBase, posicao, mensagem);
+
+    // salva histórico COM a resposta já filtrada (para o usuário ver o que recebeu)
     await supabase.from("historico").insert([
       {
         usuario_id: req.usuario.id,
         sessao_id: sessionId,
         pergunta: mensagem,
-        resposta
+        resposta: respostaFiltrada
       }
     ]);
 
-    // Se a sessão não tem título, usar começo da primeira pergunta
+    // define título na primeira mensagem
     if (!sessao.titulo || !sessao.titulo.trim()) {
       const { count } = await supabase
         .from("historico")
@@ -500,7 +544,12 @@ const resposta = completion.choices[0].message.content;
       }
     }
 
-    res.json({ resposta, sessionId });
+    res.json({
+      resposta: respostaFiltrada,
+      sessionId,
+      user_position: posicao
+      // (Opcional: poderia retornar resposta_base: respostaBase)
+    });
   } catch (error) {
     console.error("Erro no chat-rag:", {
       message: error.message,
@@ -514,17 +563,18 @@ const resposta = completion.choices[0].message.content;
 
 /* ========================= RAG helper ========================= */
 
+// gera embedding e busca contexto
 async function buscarContextoNoSupabase(pergunta, sessionId, usuarioId) {
   try {
-
-    const embeddingResp = await openai.embeddings.create({
-      model: "text-embedding-3-small", // pode trocar por -large se quiser mais qualidade
-      input: pergunta
+    // gera embedding usando gemini
+    const embeddingModel = gemini.getGenerativeModel({ model: "embedding-001" });
+    const embeddingResp = await embeddingModel.embedContent({
+      content: { parts: [{ text: pergunta }] }
     });
+    const vector = embeddingResp.embedding.values;
+    console.log("Embedding gerado:", vector);
 
-    const vector = embeddingResp.data[0].embedding;
-
-    // 2) Tentar via RPC que junta docs + histórico
+    // tenta rpc que une docs + histórico
     try {
       const { data, error } = await supabase.rpc("match_documents_and_history", {
         p_query_embedding: vector,
@@ -533,6 +583,7 @@ async function buscarContextoNoSupabase(pergunta, sessionId, usuarioId) {
         p_usuario_id: usuarioId,
         p_sessao_id: sessionId
       });
+      console.log("Data RPC match_documents_and_history:", data);
       if (error) throw error;
 
       const historicos = (data || [])
@@ -547,7 +598,7 @@ async function buscarContextoNoSupabase(pergunta, sessionId, usuarioId) {
       console.warn("RPC match_documents_and_history falhou, usando fallback:", rpcErr.message);
     }
 
-    // 3) Fallback → busca docs e histórico separadamente
+    // fallback: busca docs e histórico separadamente
     let docs = [];
     try {
       const { data: docsData } = await supabase.rpc("match_documents", {
@@ -559,6 +610,7 @@ async function buscarContextoNoSupabase(pergunta, sessionId, usuarioId) {
         docs = docsData.map((d) => d.content).filter(Boolean);
       }
     } catch {}
+    console.log("Docs fallback:", docs);
 
     let hist = [];
     try {
@@ -576,6 +628,8 @@ async function buscarContextoNoSupabase(pergunta, sessionId, usuarioId) {
       }
     } catch {}
 
+    console.log("Hist fallback:", hist);
+
     return [...hist, ...docs].join("\n");
   } catch (err) {
     console.error("Erro em buscarContextoNoSupabase:", err.message);
@@ -583,9 +637,7 @@ async function buscarContextoNoSupabase(pergunta, sessionId, usuarioId) {
   }
 }
 
-
-/* ========================= Start ========================= */
-
+// inicia servidor
 server.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
 });
