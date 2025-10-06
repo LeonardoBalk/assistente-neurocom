@@ -505,7 +505,7 @@ Evite listas numeradas exceto se realmente necessário.
     mensagens.push({ role: "user", parts: [{ text: mensagem }] });
 
     // chamada ao gemini para resposta base
-    const geminiModel = gemini.getGenerativeModel({ model: "gemini-2.5-flash" });
+    const geminiModel = gemini.getGenerativeModel({ model: "gemini-2.5-pro" });
     const geminiMessages = mensagens.map(m => ({ role: m.role === "model" ? "model" : "user", parts: m.parts }));
 
     const result = await geminiModel.generateContent({
