@@ -5,13 +5,17 @@ const express = require("express");
 const jwt = require("jsonwebtoken");
 const session = require("express-session");
 const passport = require("passport");
-// substituído openai pelo gemini
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { createClient } = require("@supabase/supabase-js");
 const { createRealtimeWSS } = require("./ws/realtime.js");
 const http = require("http");
 const cors = require("cors");
 const { verifyGoogleIdToken } = require("./googleToken.js");
+
+// Camada Dialógica
+const { generateBaseEU, gerarPerguntasContinuacao } = require("./engine.js");
+const { applyDialogicFilter } = require("./filter.js");
+const { styleImplicatedText } = require("./styler.js");
 
 const app = express();
 const SECRET = process.env.JWT_SECRET || "chave";
@@ -20,15 +24,21 @@ const PORT = process.env.PORT || 3000;
 const server = http.createServer(app);
 createRealtimeWSS(server);
 
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, {
+  db: { schema: 'public' },
+  global: { fetch: (url, opts) => fetch(url, { ...opts, timeout: 30000 }) }
+});
+
 // inicializa gemini
 const gemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 app.use(express.json());
-app.use(cors({
-  origin: process.env.FRONT_URL || "http://localhost:5173",
-  credentials: true
-}));
+app.use(
+  cors({
+    origin: process.env.FRONT_URL || "http://localhost:5173",
+    credentials: true
+  })
+);
 
 app.use(
   session({
@@ -104,7 +114,7 @@ app.post("/usuarios", async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("usuarios")
-      .insert([{ nome, email, senha }]) // dica: trocar para hash bcrypt
+      .insert([{ nome, email, senha }]) // sugestão: usar hash bcrypt
       .select();
     if (error) throw error;
     const usuario = data[0];
@@ -344,7 +354,7 @@ app.get("/chat-historico/:sessionId", autenticarToken, async (req, res) => {
 
     const { data, error } = await supabase
       .from("historico")
-      .select("id, pergunta, resposta, criado_em, sessao_id")
+      .select("id, pergunta, resposta, criado_em, sessao_id, posicao, resposta_base, followups")
       .eq("usuario_id", req.usuario.id)
       .eq("sessao_id", sessionId)
       .order("id", { ascending: true });
@@ -356,55 +366,20 @@ app.get("/chat-historico/:sessionId", autenticarToken, async (req, res) => {
   }
 });
 
-/* ========================= Camada Dialógica (Filtro TU/ELE/NÓS) ========================= */
+/* ========================= Chat Dialógico (EU -> Filtro TU/ELE/NÓS) ========================= */
 
-function aplicarFiltroDialogico(respostaBase, posicao, pergunta) {
-  const base = (respostaBase || "").trim();
-  const perguntaLimpa = (pergunta || "").trim();
-
-  const introduzirPrimeiraPessoa = (txt) => {
-    if (!/^eu\b/i.test(txt)) return `${txt.charAt(0).toLowerCase()}${txt.slice(1)}`;
-    return txt;
-  };
-
-  const ajustarPronomes = (txt, tipo) => {
-    switch (tipo) {
-      case "ELE":
-        return txt.replace(/\b(você|vc|teu|tua|te|contigo)\b/gi, "o interlocutor")
-                  .replace(/\bseu\b/gi, "do interlocutor");
-      case "NOS":
-        return txt.replace(/\b[Ee]u\b/g, "nós")
-                  .replace(/\bmeu\b/gi, "nosso")
-                  .replace(/\bminha\b/gi, "nossa");
-      default:
-        return txt;
-    }
-  };
-
-  let resultadoBase = ajustarPronomes(introduzirPrimeiraPessoa(base), posicao);
-
-  // estratégia dinâmica: construir frase de forma “decidida pela IA”
-  if (posicao === "TU") {
-    return `Percebo tua pergunta: "${perguntaLimpa}". ${resultadoBase} ${Math.random() > 0.5 ? "Se quiser, podemos explorar mais esse ponto juntos." : ""}`;
-  } else if (posicao === "ELE") {
-    return `A partir da questão "${perguntaLimpa}", noto que ${resultadoBase.toLowerCase()}. ${Math.random() > 0.5 ? "Descrevo sem julgamentos, mantendo atenção ao processo vivido." : ""}`;
-  } else if (posicao === "NOS") {
-    return `Refletindo juntos sobre "${perguntaLimpa}", sinto que ${resultadoBase.toLowerCase()}. ${Math.random() > 0.5 ? "Podemos avançar juntos, abrindo caminhos novos." : ""}`;
-  } else {
-    return `${resultadoBase}`;
-  }
+function normalizarPosicao(p) {
+  const v = (p || "TU").toString().trim().toUpperCase();
+  if (["TU", "ELE", "NOS"].includes(v)) return v;
+  if (v === "NÓS" || v === "NOSSO" || v === "NOSSA") return "NOS";
+  return "TU";
 }
 
-
-/* ========================= Chat RAG ========================= */
-
 app.post("/chat-rag", autenticarToken, async (req, res) => {
-  let { mensagem, sessionId, user_position } = req.body;
+  let { mensagem, sessionId, user_position, gerar_perguntas } = req.body;
   if (!mensagem) return res.status(400).json({ erro: "Mensagem obrigatória" });
 
-  // normaliza posição dialógica
-  let posicao = (user_position || "TU").toString().trim().toUpperCase();
-  if (!["TU", "ELE", "NOS"].includes(posicao)) posicao = "TU";
+  const posicao = normalizarPosicao(user_position);
 
   try {
     // garante sessão válida
@@ -420,7 +395,7 @@ app.post("/chat-rag", autenticarToken, async (req, res) => {
       }
     }
 
-    // verifica pedido para últimas mensagens
+    // pedido de listagem de últimas mensagens do usuário
     const lower = mensagem.toLowerCase();
     const pedeUltimas =
       (lower.includes("ultimas") || lower.includes("últimas")) &&
@@ -452,10 +427,8 @@ app.post("/chat-rag", autenticarToken, async (req, res) => {
       return res.json({ resposta, sessionId, user_position: posicao });
     }
 
-    // busca contexto no supabase
+    // contexto RAG
     const contexto = await buscarContextoNoSupabase(mensagem, sessionId, req.usuario.id);
-    console.log("Contexto recuperado:", contexto);
-    console.log("Posição dialógica solicitada:", posicao);
 
     // pega últimos 10 turnos do histórico
     const { data: histData } = await supabase
@@ -470,85 +443,78 @@ app.post("/chat-rag", autenticarToken, async (req, res) => {
       ? [...histData].sort((a, b) => a.id - b.id)
       : [];
 
-    // instruções para o modelo: gerar apenas a resposta base em primeira pessoa (EU)
-    const instrucoes = `
-    you are a specialist doctor. use only dr. sérgio spritzer's books and teachings. if not found, use your knowledge but do not invent.
-answer as if you are dr. sérgio spritzer. never mention him in 3rd person.
-only answer: neurology, communication disorders, human intelligence, psychoanalysis, nlp, hypnosis, human interactions.
-always check if the issue is clinical, psychological or behavioral.
-do not invent info. answer only what is in dr. sérgio's books/context.
-always in brazilian portuguese.
-do not mention dr. sérgio's history, only use the knowledge. say you use dr. sérgio's books if asked about source.
-give direct, practical answers. do not recap unless necessary.
-Você é uma IA dialógica baseada na "Inteligência Implicada".
-Gere APENAS uma resposta base em PRIMEIRA PESSOA SINGULAR (usar "eu").
-Evite tom neutro ou impessoal. Acolha o sentido experiencial da pergunta.
-Ainda NÃO adapte para TU / ELE / NÓS (isso será feito depois).
-Se usar fontes implícitas do contexto, reelabore com linguagem própria (não copie literal).
-Foco fenomenológico, relacional, encarnado e implicado.
-Evite listas numeradas exceto se realmente necessário.
-    `.trim();
-
-    // monta mensagens no formato do gemini
-    const mensagens = [];
-    mensagens.push({ role: "user", parts: [{ text: `[INSTRUCOES]\n${instrucoes}` }] });
-    if (contexto && contexto.trim()) {
-      mensagens.push({
-        role: "user",
-        parts: [{ text: `Contexto relevante (use apenas como apoio indireto, sem citar literalmente):\n\n${contexto}` }]
-      });
-    }
-    for (const h of historicoCronologico) {
-      if (h.pergunta) mensagens.push({ role: "user", parts: [{ text: h.pergunta }] });
-      if (h.resposta) mensagens.push({ role: "model", parts: [{ text: h.resposta }] });
-    }
-    mensagens.push({ role: "user", parts: [{ text: mensagem }] });
-
-    // chamada ao gemini para resposta base
-    const geminiModel = gemini.getGenerativeModel({ model: "gemini-2.5-pro" });
-    const geminiMessages = mensagens.map(m => ({ role: m.role === "model" ? "model" : "user", parts: m.parts }));
-
-    const result = await geminiModel.generateContent({
-      contents: geminiMessages,
+    // 1) gera resposta base em EU
+    const respostaBaseRaw = await generateBaseEU({
+      gemini,
+      mensagem,
+      contexto,
+      historico: historicoCronologico
     });
 
-    const respostaBase = result.response.candidates[0]?.content?.parts?.map(p => p.text).join("\n") ||
-      "Eu reconheço que, neste momento, não tenho clareza suficiente para responder plenamente.";
+    // 2) aplica styler implicado
+    const respostaBase = styleImplicatedText(respostaBaseRaw);
 
-    // aplica filtro dialógico conforme posição solicitada
-    const respostaFiltrada = aplicarFiltroDialogico(respostaBase, posicao, mensagem);
+    // 3) aplica filtro posicional conforme TU/ELE/NÓS
+    const respostaFiltrada = applyDialogicFilter(respostaBase, posicao, mensagem);
 
-    // salva histórico COM a resposta já filtrada (para o usuário ver o que recebeu)
-    await supabase.from("historico").insert([
-      {
-        usuario_id: req.usuario.id,
-        sessao_id: sessionId,
-        pergunta: mensagem,
-        resposta: respostaFiltrada
-      }
-    ]);
-
-    // define título na primeira mensagem
-    if (!sessao.titulo || !sessao.titulo.trim()) {
-      const { count } = await supabase
-        .from("historico")
-        .select("*", { count: "exact", head: true })
-        .eq("usuario_id", req.usuario.id)
-        .eq("sessao_id", sessionId);
-      if (count === 1) {
-        await supabase
-          .from("sessoes")
-          .update({ titulo: mensagem.slice(0, 60) })
-          .eq("id", sessionId)
-          .eq("usuario_id", req.usuario.id);
+    // 4) (opcional) perguntas de continuação
+    let followups = [];
+    if (gerar_perguntas !== false) {
+      try {
+        followups = await gerarPerguntasContinuacao({ gemini, baseEU: respostaBase, mensagem, posicao });
+      } catch (e) {
+        console.warn("Falha ao gerar perguntas de continuação:", e?.message);
       }
     }
+
+    // salva histórico (grava o que o usuário recebeu; guarda base EU e posicao se houver colunas)
+    try {
+      await supabase.from("historico").insert([
+        {
+          usuario_id: req.usuario.id,
+          sessao_id: sessionId,
+          pergunta: mensagem,
+          resposta: respostaFiltrada,
+          posicao,
+          resposta_base: respostaBase,
+          followups
+        }
+      ]);
+    } catch (e) {
+      // compat: se sua tabela não tiver colunas novas, faz insert mínimo
+      await supabase.from("historico").insert([
+        {
+          usuario_id: req.usuario.id,
+          sessao_id: sessionId,
+          pergunta: mensagem,
+          resposta: respostaFiltrada
+        }
+      ]);
+    }
+
+    // define título na primeira mensagem
+    try {
+      if (!sessao.titulo || !sessao.titulo.trim()) {
+        const { count } = await supabase
+          .from("historico")
+          .select("*", { count: "exact", head: true })
+          .eq("usuario_id", req.usuario.id)
+          .eq("sessao_id", sessionId);
+        if (count === 1) {
+          await supabase
+            .from("sessoes")
+            .update({ titulo: mensagem.slice(0, 60) })
+            .eq("id", sessionId)
+            .eq("usuario_id", req.usuario.id);
+        }
+      }
+    } catch {}
 
     res.json({
       resposta: respostaFiltrada,
       sessionId,
-      user_position: posicao
-      // (Opcional: poderia retornar resposta_base: respostaBase)
+      user_position: posicao,
+      followups
     });
   } catch (error) {
     console.error("Erro no chat-rag:", {
@@ -566,13 +532,16 @@ Evite listas numeradas exceto se realmente necessário.
 // gera embedding e busca contexto
 async function buscarContextoNoSupabase(pergunta, sessionId, usuarioId) {
   try {
-    // gera embedding usando gemini
-    const embeddingModel = gemini.getGenerativeModel({ model: "embedding-001" });
+    // gera embedding usando gemini (modelo atualizado)
+    const embeddingModelName = process.env.GEMINI_EMBED_MODEL || "text-embedding-004";
+    const embeddingModel = gemini.getGenerativeModel({ model: embeddingModelName });
     const embeddingResp = await embeddingModel.embedContent({
       content: { parts: [{ text: pergunta }] }
     });
-    const vector = embeddingResp.embedding.values;
-    console.log("Embedding gerado:", vector);
+    const vector = embeddingResp.embedding?.values || [];
+    if (!Array.isArray(vector) || vector.length === 0) {
+      console.warn("Embedding vazio; seguindo sem vetor.");
+    }
 
     // tenta rpc que une docs + histórico
     try {
@@ -583,7 +552,6 @@ async function buscarContextoNoSupabase(pergunta, sessionId, usuarioId) {
         p_usuario_id: usuarioId,
         p_sessao_id: sessionId
       });
-      console.log("Data RPC match_documents_and_history:", data);
       if (error) throw error;
 
       const historicos = (data || [])
@@ -610,7 +578,6 @@ async function buscarContextoNoSupabase(pergunta, sessionId, usuarioId) {
         docs = docsData.map((d) => d.content).filter(Boolean);
       }
     } catch {}
-    console.log("Docs fallback:", docs);
 
     let hist = [];
     try {
@@ -627,8 +594,6 @@ async function buscarContextoNoSupabase(pergunta, sessionId, usuarioId) {
           .map((x) => `${x.pergunta}\n${x.resposta}`);
       }
     } catch {}
-
-    console.log("Hist fallback:", hist);
 
     return [...hist, ...docs].join("\n");
   } catch (err) {
