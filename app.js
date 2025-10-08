@@ -12,9 +12,8 @@ const http = require("http");
 const cors = require("cors");
 const { verifyGoogleIdToken } = require("./googleToken.js");
 
-// Camada Dialógica
-const { generateBaseEU, gerarPerguntasContinuacao } = require("./engine.js");
-const { applyDialogicFilter } = require("./filter.js");
+// Camada Dialógica (gera direto no estilo TU/ELE/NÓS)
+const { generateByPosition, gerarPerguntasContinuacao } = require("./engine.js");
 const { styleImplicatedText } = require("./styler.js");
 
 const app = express();
@@ -25,8 +24,10 @@ const server = http.createServer(app);
 createRealtimeWSS(server);
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, {
-  db: { schema: 'public' },
-  global: { fetch: (url, opts) => fetch(url, { ...opts, timeout: 30000 }) }
+  db: { schema: "public" },
+  global: {
+    fetch: (url, opts) => fetch(url, { ...opts, timeout: 30000 })
+  }
 });
 
 // inicializa gemini
@@ -366,7 +367,7 @@ app.get("/chat-historico/:sessionId", autenticarToken, async (req, res) => {
   }
 });
 
-/* ========================= Chat Dialógico (EU -> Filtro TU/ELE/NÓS) ========================= */
+/* ========================= Chat Dialógico (direto TU/ELE/NÓS) ========================= */
 
 function normalizarPosicao(p) {
   const v = (p || "TU").toString().trim().toUpperCase();
@@ -443,40 +444,43 @@ app.post("/chat-rag", autenticarToken, async (req, res) => {
       ? [...histData].sort((a, b) => a.id - b.id)
       : [];
 
-    // 1) gera resposta base em EU
-    const respostaBaseRaw = await generateBaseEU({
+    // 1) gera resposta diretamente no registro posicional (TU/ELE/NÓS)
+    const respostaRaw = await generateByPosition({
       gemini,
       mensagem,
       contexto,
-      historico: historicoCronologico
+      historico: historicoCronologico,
+      posicao
     });
 
-    // 2) aplica styler implicado
-    const respostaBase = styleImplicatedText(respostaBaseRaw);
+    // 2) aplica styler implicado (polimento)
+    const respostaFinal = styleImplicatedText(respostaRaw);
 
-    // 3) aplica filtro posicional conforme TU/ELE/NÓS
-    const respostaFiltrada = applyDialogicFilter(respostaBase, posicao, mensagem);
-
-    // 4) (opcional) perguntas de continuação
+    // 3) (opcional) perguntas de continuação
     let followups = [];
     if (gerar_perguntas !== false) {
       try {
-        followups = await gerarPerguntasContinuacao({ gemini, baseEU: respostaBase, mensagem, posicao });
+        followups = await gerarPerguntasContinuacao({
+          gemini,
+          baseText: respostaFinal,
+          mensagem,
+          posicao
+        });
       } catch (e) {
         console.warn("Falha ao gerar perguntas de continuação:", e?.message);
       }
     }
 
-    // salva histórico (grava o que o usuário recebeu; guarda base EU e posicao se houver colunas)
+    // salva histórico (grava o que o usuário recebeu; guarda resposta base bruta e posicao se houver colunas)
     try {
       await supabase.from("historico").insert([
         {
           usuario_id: req.usuario.id,
           sessao_id: sessionId,
           pergunta: mensagem,
-          resposta: respostaFiltrada,
+          resposta: respostaFinal,
           posicao,
-          resposta_base: respostaBase,
+          resposta_base: respostaRaw,
           followups
         }
       ]);
@@ -487,7 +491,7 @@ app.post("/chat-rag", autenticarToken, async (req, res) => {
           usuario_id: req.usuario.id,
           sessao_id: sessionId,
           pergunta: mensagem,
-          resposta: respostaFiltrada
+          resposta: respostaFinal
         }
       ]);
     }
@@ -511,7 +515,7 @@ app.post("/chat-rag", autenticarToken, async (req, res) => {
     } catch {}
 
     res.json({
-      resposta: respostaFiltrada,
+      resposta: respostaFinal,
       sessionId,
       user_position: posicao,
       followups

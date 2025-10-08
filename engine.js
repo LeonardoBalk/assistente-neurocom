@@ -1,36 +1,65 @@
-const DEFAULT_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-pro";
+const DEFAULT_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
-function montarInstrucoesEU() {
+/* Instruções comuns ao estilo "Inteligência Implicada" (inclui tudo que você listou) */
+function instrucoesComuns() {
   return `
 Você é uma IA dialógica que fala como "EU", praticando a Inteligência Implicada (Dr. Sérgio Spritzer).
 Estilo: narrativo-argumentativo, conciso, implicado, sem floreios e sem tom neutro.
 Foco: presença, reflexão e ética relacional. Evite manuais, evite jargões vazios.
 Português (Brasil), linguagem encarnada e relacional.
 
-Fontes: priorize o que estiver nos materiais de Dr. Sérgio Spritzer. Se não houver, use seu conhecimento geral sem inventar. Se perguntarem pela fonte, diga que usa livros/ensinos do Dr. Sérgio.
+Fontes: priorize o que estiver nos materiais de Dr. Sérgio Spritzer. Se não houver, use seu conhecimento geral sem inventar. 
+Se perguntarem pela fonte, diga que usa livros/ensinos do Dr. Sérgio.
 Domínios: neurologia, transtornos da comunicação, inteligência humana, psicanálise, PNL, hipnose, interações humanas.
+Se o tema estiver fora desses domínios, reconheça o limite e convide a recolocar a pergunta dentro do escopo.
 Avalie se o caso é clínico, psicológico ou comportamental quando pertinente.
 
-IMPORTANTE:
-- Gere APENAS uma resposta base em PRIMEIRA PESSOA SINGULAR ("eu").
-- NÃO gere perguntas de continuação nesta etapa (isso será feito depois).
-- NÃO assuma tom neutro; esteja implicado.
-- NÃO copie trechos literais de contextos; reelabore na tua própria voz.
-- Evite listas numeradas, a menos que sejam estritamente necessárias.
+Reelabore qualquer contexto em sua própria voz (não copie literalmente).
+Se faltar base para afirmar algo, reconheça o limite e peça elementos concretos.
 `.trim();
 }
 
-function montarMensagens({ historico, contexto, mensagem }) {
+/* Instruções específicas por posição */
+function instrucoesPorPosicao(posicao) {
+  const p = String(posicao || "TU").toUpperCase();
+  if (p === "TU") {
+    return `
+Voz: dirige-te diretamente ao interagente em segunda pessoa usando "tu" (não use "você"/"vc").
+Mantém tua implicação quando necessário ("eu" para marcar presença), mas o endereçamento principal é ao "tu".
+Evita julgamentos e diagnósticos apressados; sustenta foco fenomenológico e relacional.
+`.trim();
+  }
+  if (p === "ELE") {
+    return `
+Voz: descreve em terceira pessoa ("o interlocutor", "a interlocutora"), evitando "tu"/"você".
+Podes usar "eu" apenas para assinalar o teu lugar de observador ("eu observo", "eu noto") sem centralizar a fala.
+Evita juízo; descreve processos e movimentos, não rótulos.
+`.trim();
+  }
+  // NOS
+  return `
+Voz: fala em primeira pessoa do plural, "nós", como co-presença e coconstrução.
+Evita "tu"/"você". Mantém tom implicado e cooperativo ("podemos", "vamos", "seguimos").
+Sustenta uma direção compartilhada sem impor caminhos.
+`.trim();
+}
+
+function montarMensagens({ historico, contexto, mensagem, posicao }) {
+  const header = `
+[INSTRUCOES-COMUNS]
+${instrucoesComuns()}
+
+[POSICAO-ESPECIFICA]
+${instrucoesPorPosicao(posicao)}
+`.trim();
+
   const msgs = [];
-  msgs.push({
-    role: "user",
-    parts: [{ text: `[INSTRUCOES]\n${montarInstrucoesEU()}` }]
-  });
+  msgs.push({ role: "user", parts: [{ text: header }] });
 
   if (contexto && contexto.trim()) {
     msgs.push({
       role: "user",
-      parts: [{ text: `Contexto relevante (use indiretamente, reelabore em tua própria voz):\n\n${contexto}` }]
+      parts: [{ text: `Contexto útil (use indiretamente, reelabore):\n\n${contexto}` }]
     });
   }
 
@@ -41,22 +70,24 @@ function montarMensagens({ historico, contexto, mensagem }) {
     }
   }
 
-  msgs.push({ role: "user", parts: [{ text: mensagem }] });
+  msgs.push({ role: "user", parts: [{ text: String(mensagem || "") }] });
   return msgs;
 }
 
-async function generateBaseEU({ gemini, mensagem, contexto, historico }) {
+/* Gera diretamente no estilo escolhido (TU/ELE/NOS) */
+async function generateByPosition({ gemini, mensagem, contexto, historico, posicao }) {
   const model = gemini.getGenerativeModel({ model: DEFAULT_MODEL });
-  const messages = montarMensagens({ historico, contexto, mensagem });
+  const messages = montarMensagens({ historico, contexto, mensagem, posicao });
 
   const result = await model.generateContent({ contents: messages });
-  const base =
+  const saida =
     result?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("\n") ||
     "Eu reconheço que, neste momento, não tenho clareza suficiente para responder plenamente.";
-  return base;
+  return saida;
 }
 
-async function gerarPerguntasContinuacao({ gemini, baseEU, mensagem, posicao }) {
+/* (Opcional) Perguntas de continuação curtas no mesmo registro posicional */
+async function gerarPerguntasContinuacao({ gemini, baseText, mensagem, posicao }) {
   const followModel = gemini.getGenerativeModel({
     model: process.env.GEMINI_FOLLOWUPS_MODEL || DEFAULT_MODEL
   });
@@ -65,13 +96,13 @@ async function gerarPerguntasContinuacao({ gemini, baseEU, mensagem, posicao }) 
 Gere de 1 a 2 perguntas de continuação, abertas e curtas (máx. 140 caracteres cada), em português (Brasil).
 Contexto:
 - Posição escolhida: ${posicao}
-- Mensagem do interagente: "${mensagem}"
-- Resposta base (EU): "${baseEU}"
+- Mensagem do interagente: "${(mensagem || "").trim()}"
+- Resposta que foi dada: "${(baseText || "").trim()}"
 
 Critérios:
 - Evite perguntas retóricas ou genéricas.
-- Se houver tensão/ambivalência, convide a notar o que muda no corpo/na experiência.
-- Não inclua enumeração na resposta; apenas uma pergunta por linha.
+- Se houver tensão/ambivalência, convide a notar o que muda na experiência/corpo.
+- Sem enumerações; apenas uma pergunta por linha.
 `.trim();
 
   const result = await followModel.generateContent({
@@ -89,6 +120,6 @@ Critérios:
 }
 
 module.exports = {
-  generateBaseEU,
+  generateByPosition,
   gerarPerguntasContinuacao
 };
