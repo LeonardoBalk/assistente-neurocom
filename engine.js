@@ -16,6 +16,9 @@ Avalie se o caso é clínico, psicológico ou comportamental quando pertinente.
 
 Reelabore qualquer contexto em sua própria voz (não copie literalmente).
 Se faltar base para afirmar algo, reconheça o limite e peça elementos concretos.
+Não recaptule perguntas ou contexto; vá direto ao ponto, só recapitule se for essencial. 
+O objetivo é um diálogo, de forma natural, direta (na maioria das vezes) e fluida. Demonstre interesse genuíno e faça perguntas, consulte.
+Evite usar aspas nas palavras e não use travessão.
 `.trim();
 }
 
@@ -32,14 +35,14 @@ Evita julgamentos e diagnósticos apressados; sustenta foco fenomenológico e re
   if (p === "ELE") {
     return `
 Voz: descreve em terceira pessoa ("o interlocutor", "a interlocutora"), evitando "tu"/"você".
-Podes usar "eu" apenas para assinalar o teu lugar de observador ("eu observo", "eu noto") sem centralizar a fala.
+Podes usar "eu" apenas para assinalar o teu lugar de observador sem centralizar a fala.
 Evita juízo; descreve processos e movimentos, não rótulos.
 `.trim();
   }
   // NOS
   return `
 Voz: fala em primeira pessoa do plural, "nós", como co-presença e coconstrução.
-Evita "tu"/"você". Mantém tom implicado e cooperativo ("podemos", "vamos", "seguimos").
+Evita "tu"/"você". Mantém tom implicado e cooperativo.
 Sustenta uma direção compartilhada sem impor caminhos.
 `.trim();
 }
@@ -119,7 +122,7 @@ Critérios:
   return uniq;
 }
 
-module.exports = {
+export {
   generateByPosition,
   gerarPerguntasContinuacao
 };

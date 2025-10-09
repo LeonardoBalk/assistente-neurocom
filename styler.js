@@ -48,6 +48,6 @@ function styleImplicatedText(text) {
   return t;
 }
 
-module.exports = {
+export {
   styleImplicatedText
 };

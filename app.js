@@ -1,20 +1,19 @@
 // carrega variáveis de ambiente
-require("dotenv").config();
-
-const express = require("express");
-const jwt = require("jsonwebtoken");
-const session = require("express-session");
-const passport = require("passport");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
-const { createClient } = require("@supabase/supabase-js");
-const { createRealtimeWSS } = require("./ws/realtime.js");
-const http = require("http");
-const cors = require("cors");
-const { verifyGoogleIdToken } = require("./googleToken.js");
+import dotenv from "dotenv";
+dotenv.config();
+import express from "express";
+import jwt from "jsonwebtoken";
+import session from "express-session";
+import passport from "passport";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { createClient } from "@supabase/supabase-js";
+import { createRealtimeWSS } from "./ws/realtime.js";
+import http from "http";
+import cors from "cors";
+import { verifyGoogleIdToken } from "./googleToken.js";
 
 // Camada Dialógica (gera direto no estilo TU/ELE/NÓS)
-const { generateByPosition, gerarPerguntasContinuacao } = require("./engine.js");
-const { styleImplicatedText } = require("./styler.js");
+import { generateByPosition, gerarPerguntasContinuacao } from "./engine.js";
 
 const app = express();
 const SECRET = process.env.JWT_SECRET || "chave";
@@ -32,6 +31,30 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 
 // inicializa gemini
 const gemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+const embedModel = gemini.getGenerativeModel({ model: "text-embedding-004" }); // inicializa modelo
+
+const result = await embedModel.embedContent("Seu texto em português aqui", {
+  outputDimensionality: 768, // padroniza 768 dimensões
+});
+
+const embedding = result.embedding;
+console.log(embedding.values.length); // Vai imprimir 768
+
+// Helper central para gerar embeddings
+async function embedText(text) {
+  const resp = await embedModel.embedContent({
+    content: { parts: [{ text }] }
+  });
+  const vec = resp.embedding?.values || [];
+  if (!Array.isArray(vec) || vec.length === 0) {
+    throw new Error("Embedding vazio");
+  }
+  if (vec.length !== 768) {
+    throw new Error(`Embedding dimension mismatch: got ${vec.length}, expected 768`);
+  }
+  return vec;
+}
 
 app.use(express.json());
 app.use(
@@ -239,7 +262,7 @@ app.get("/me", autenticarToken, async (req, res) => {
       .select("id,nome,email,avatar_url,provider")
       .eq("id", req.usuario.id)
       .single();
-    if (error || !data) {
+  if (error || !data) {
       return res.status(404).json({ erro: "Usuário não encontrado" });
     }
     return res.json(data);
@@ -367,6 +390,90 @@ app.get("/chat-historico/:sessionId", autenticarToken, async (req, res) => {
   }
 });
 
+// DEBUG: ver resultados de retrieval (docs + histórico)
+// DEBUG: ver resultados de retrieval (docs + histórico)
+app.get("/debug/rag-search", autenticarToken, async (req, res) => {
+  try {
+    const q = (req.query.q || "").toString();
+    const sessionId = (req.query.sessionId || "").toString();
+    const minSimDocs = parseFloat(req.query.minSimDocs ?? "0.30");
+    const minSimHist = parseFloat(req.query.minSimHist ?? "0.25");
+    const docsK = parseInt(req.query.docsK ?? "8", 10);
+    const histK = parseInt(req.query.histK ?? "6", 10);
+
+    if (!q) return res.status(400).json({ erro: "Passe ?q=pergunta para testar." });
+    if (!sessionId) return res.status(400).json({ erro: "Passe ?sessionId=<uuid> da sessão." });
+
+    const sess = await getSessionIfOwned(sessionId, req.usuario.id);
+    if (!sess) return res.status(404).json({ erro: "Sessão não encontrada" });
+
+    const started = Date.now();
+    const vec = await embedText(q);
+
+    let rows = [];
+    try {
+      const { data, error } = await supabase.rpc("search_docs_and_history", {
+        p_query_embedding: vec,
+        p_usuario_id: req.usuario.id,
+        p_sessao_id: sessionId,
+        p_match_count: docsK,
+        p_history_count: histK,
+        p_min_sim_docs: isNaN(minSimDocs) ? 0.30 : minSimDocs,
+        p_min_sim_hist: isNaN(minSimHist) ? 0.25 : minSimHist,
+        p_recency_half_life_seconds: 86400,
+        p_total_limit: null
+      });
+      if (error) throw error;
+      rows = data || [];
+    } catch (e) {
+      const { data: docsData, error: mdErr } = await supabase.rpc("match_documents", {
+        p_query_embedding: vec,
+        p_match_count: docsK,
+        p_min_sim: isNaN(minSimDocs) ? 0.30 : minSimDocs,
+        p_candidate_pool: 100
+      });
+      if (mdErr) throw mdErr;
+      rows = (docsData || []).map(d => ({
+        id: d.id,
+        content: d.content,
+        similarity: d.similarity,
+        tipo: "documento",
+        score: d.similarity
+      }));
+    }
+
+    const tookMs = Date.now() - started;
+
+    const byTipo = (t) =>
+      rows
+        .filter(r => r.tipo === t)
+        .map(r => ({
+          id: r.id,
+          similarity: r.similarity ?? null,
+          score: r.score ?? null,
+          preview: (r.content || "").slice(0, 200)
+        }));
+
+    return res.json({
+      query: q,
+      took_ms: tookMs,
+      total: rows.length,
+      documentos: byTipo("documento"),
+      historico: byTipo("historico"),
+      raw_top3: rows.slice(0, 3).map(r => ({
+        id: r.id,
+        tipo: r.tipo,
+        sim: r.similarity,
+        score: r.score,
+        preview: (r.content || "").slice(0, 300)
+      }))
+    });
+  } catch (err) {
+    console.error("Erro /debug/rag-search:", err);
+    return res.status(500).json({ erro: "Falha no debug RAG" });
+  }
+});
+
 /* ========================= Chat Dialógico (direto TU/ELE/NÓS) ========================= */
 
 function normalizarPosicao(p) {
@@ -428,7 +535,7 @@ app.post("/chat-rag", autenticarToken, async (req, res) => {
       return res.json({ resposta, sessionId, user_position: posicao });
     }
 
-    // contexto RAG
+    // contexto RAG (usa a nova RPC unificada e 768 dims)
     const contexto = await buscarContextoNoSupabase(mensagem, sessionId, req.usuario.id);
 
     // pega últimos 10 turnos do histórico
@@ -454,7 +561,7 @@ app.post("/chat-rag", autenticarToken, async (req, res) => {
     });
 
     // 2) aplica styler implicado (polimento)
-    const respostaFinal = styleImplicatedText(respostaRaw);
+    const respostaFinal = respostaRaw;
 
     // 3) (opcional) perguntas de continuação
     let followups = [];
@@ -471,8 +578,48 @@ app.post("/chat-rag", autenticarToken, async (req, res) => {
       }
     }
 
-    // salva histórico (grava o que o usuário recebeu; guarda resposta base bruta e posicao se houver colunas)
+    // 4) salva histórico já com embedding (pergunta + resposta)
     try {
+      const histEmbeddingText = `${mensagem}\n${respostaFinal}`;
+      const histVec = await embedText(histEmbeddingText);
+
+      // Tenta RPC (recomendado, faz cast para vector(768) no server)
+      const { data: insRpc, error: insRpcErr } = await supabase.rpc("insert_historico", {
+        p_usuario_id: req.usuario.id,
+        p_sessao_id: sessionId,
+        p_pergunta: mensagem,
+        p_resposta: respostaFinal,
+        p_embedding: histVec
+      });
+
+      if (insRpcErr) {
+        // Fallback: insert direto, incluindo a coluna embedding
+        const { error: insErr } = await supabase.from("historico").insert([
+          {
+            usuario_id: req.usuario.id,
+            sessao_id: sessionId,
+            pergunta: mensagem,
+            resposta: respostaFinal,
+            posicao,
+            resposta_base: respostaRaw,
+            followups,
+            embedding: histVec
+          }
+        ]);
+        if (insErr) throw insErr;
+      } else {
+        // Atualiza colunas adicionais que a RPC não cobre, se desejar
+        try {
+          await supabase.from("historico").update({
+            posicao,
+            resposta_base: respostaRaw,
+            followups
+          })
+          .eq("id", insRpc); // a RPC retorna o id inserido
+        } catch {}
+      }
+    } catch (e) {
+      console.warn("Falha ao salvar histórico com embedding; tentando insert mínimo.", e?.message);
       await supabase.from("historico").insert([
         {
           usuario_id: req.usuario.id,
@@ -482,16 +629,6 @@ app.post("/chat-rag", autenticarToken, async (req, res) => {
           posicao,
           resposta_base: respostaRaw,
           followups
-        }
-      ]);
-    } catch (e) {
-      // compat: se sua tabela não tiver colunas novas, faz insert mínimo
-      await supabase.from("historico").insert([
-        {
-          usuario_id: req.usuario.id,
-          sessao_id: sessionId,
-          pergunta: mensagem,
-          resposta: respostaFinal
         }
       ]);
     }
@@ -536,25 +673,21 @@ app.post("/chat-rag", autenticarToken, async (req, res) => {
 // gera embedding e busca contexto
 async function buscarContextoNoSupabase(pergunta, sessionId, usuarioId) {
   try {
-    // gera embedding usando gemini (modelo atualizado)
-    const embeddingModelName = process.env.GEMINI_EMBED_MODEL || "text-embedding-004";
-    const embeddingModel = gemini.getGenerativeModel({ model: embeddingModelName });
-    const embeddingResp = await embeddingModel.embedContent({
-      content: { parts: [{ text: pergunta }] }
-    });
-    const vector = embeddingResp.embedding?.values || [];
-    if (!Array.isArray(vector) || vector.length === 0) {
-      console.warn("Embedding vazio; seguindo sem vetor.");
-    }
+    // gera embedding com o modelo padrão 768
+    const vector = await embedText(pergunta);
 
-    // tenta rpc que une docs + histórico
+    // 1) RPC unificada: documentos + histórico com score de similaridade + recência
     try {
-      const { data, error } = await supabase.rpc("match_documents_and_history", {
+      const { data, error } = await supabase.rpc("search_docs_and_history", {
         p_query_embedding: vector,
-        p_match_count: 5,
-        p_history_count: 10,
         p_usuario_id: usuarioId,
-        p_sessao_id: sessionId
+        p_sessao_id: sessionId,
+        p_match_count: 8,
+        p_history_count: 6,
+        p_min_sim_docs: 0.30,
+        p_min_sim_hist: 0.25,
+        p_recency_half_life_seconds: 86400,
+        p_total_limit: null
       });
       if (error) throw error;
 
@@ -567,22 +700,27 @@ async function buscarContextoNoSupabase(pergunta, sessionId, usuarioId) {
 
       return [...historicos, ...docs].join("\n");
     } catch (rpcErr) {
-      console.warn("RPC match_documents_and_history falhou, usando fallback:", rpcErr.message);
+      console.warn("RPC search_docs_and_history falhou, usando fallback:", rpcErr.message);
     }
 
-    // fallback: busca docs e histórico separadamente
+    // 2) Fallback: match_documents (parâmetros corretos)
     let docs = [];
     try {
-      const { data: docsData } = await supabase.rpc("match_documents", {
-        query_embedding: vector,
-        match_count: 5,
-        filter: null
+      const { data: docsData, error: mdErr } = await supabase.rpc("match_documents", {
+        p_query_embedding: vector,
+        p_match_count: 8,
+        p_min_sim: 0.30,
+        p_candidate_pool: 50
       });
+      if (mdErr) throw mdErr;
       if (Array.isArray(docsData)) {
         docs = docsData.map((d) => d.content).filter(Boolean);
       }
-    } catch {}
+    } catch (e) {
+      console.warn("Fallback match_documents falhou:", e?.message);
+    }
 
+    // 3) Fallback extra: histórico recente por recência (sem similaridade)
     let hist = [];
     try {
       const { data: h } = await supabase
