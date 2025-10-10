@@ -92,7 +92,7 @@ async function generateByPosition({ gemini, mensagem, contexto, historico, posic
 /* (Opcional) Perguntas de continuação curtas no mesmo registro posicional */
 async function gerarPerguntasContinuacao({ gemini, baseText, mensagem, posicao }) {
   const followModel = gemini.getGenerativeModel({
-    model: process.env.GEMINI_FOLLOWUPS_MODEL || DEFAULT_MODEL
+    model: process.env.GEMINI_FOLLOWUPS_MODEL || process.env.GEMINI_MODEL || "gemini-2.5-flash"
   });
 
   const prompt = `
@@ -122,7 +122,4 @@ Critérios:
   return uniq;
 }
 
-export {
-  generateByPosition,
-  gerarPerguntasContinuacao
-};
+export { generateByPosition, gerarPerguntasContinuacao };
