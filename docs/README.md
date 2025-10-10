@@ -282,9 +282,3 @@ Consulte [docs/openapi.yaml](openapi.yaml) para esquemas e exemplos formais.
 - Não logar tokens ou dados sensíveis
 - Erros 500 não expõem stack em produção
 - Rate limiting recomendado em rotas públicas
-
-## Deploy no Render
-- Build Command: `npm install`
-- Start Command: `npm start`
-- Health Check Path: `/health`
-- Env vars: SUPABASE_URL, SUPABASE_KEY, GEMINI_API_KEY, JWT_SECRET, FRONT_URL, GOOGLE_CLIENT_ID
