@@ -236,7 +236,7 @@ npm start
     ```
     Erros: 401, 404 (sessão), 500
 
-Consulte [docs/openapi.yaml](docs/openapi.yaml) para esquemas e exemplos formais.
+Consulte [docs/openapi.yaml](openapi.yaml) para esquemas e exemplos formais.
 
 ## WebSocket
 - Conexão: usa o mesmo servidor HTTP (src/server.js) via ws.
@@ -259,7 +259,7 @@ Consulte [docs/openapi.yaml](docs/openapi.yaml) para esquemas e exemplos formais
     ```json
     { "type": "server-broadcast", "event": "joined", "sessionId": "uuid", "userId": 1 }
     ```
-- Ajuste os tipos conforme sua lógica em `src/ws/realtime.js`. Veja [docs/WEBSOCKET.md](docs/WEBSOCKET.md) para detalhes.
+- Ajuste os tipos conforme sua lógica em `src/ws/realtime.js`. Veja [WEBSOCKET.md](WEBSOCKET.md) para detalhes.
 
 ## RAG e Embeddings
 - Modelo de embedding: `text-embedding-004`, 768 dimensões (validado no serviço).
@@ -273,7 +273,7 @@ Consulte [docs/openapi.yaml](docs/openapi.yaml) para esquemas e exemplos formais
   - minSimDocs padrão: 0.30
   - minSimHist padrão: 0.25
   - recency_half_life_seconds: 86400 (decay ~1 dia)
-- Detalhes e SQLs completas em [docs/RAG.md](docs/RAG.md).
+- Detalhes e SQLs completas em [docs/RAG.md](RAG.md).
 
 ## Segurança
 - JWT com expiração (1h)
