@@ -27,7 +27,7 @@ Backend em Node.js/Express com:
 ## Diagrama de arquitetura
 ```mermaid
 graph TD
-  F[Frontend] -->|HTTP/WS| API[Express App (src/app.js)]
+  F[Frontend] --> HTTP/WS API[Express App (src/app.js)]
   API -->|Routes| CTR[Controllers]
   CTR --> SRV[Services]
   SRV --> REP[Repositories]
