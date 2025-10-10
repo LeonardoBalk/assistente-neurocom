@@ -6,7 +6,6 @@ Backend em Node.js/Express com:
 - Integração com Google Generative AI (Gemini) para geração e embeddings (RAG)
 - Camadas modulares (controllers → services → repositories → clients)
 - WebSocket (ws) para recursos em tempo real
-- Deploy no Render
 
 ## Sumário
 - [Diagrama de arquitetura](#diagrama-de-arquitetura)
