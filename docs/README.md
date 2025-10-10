@@ -27,15 +27,15 @@ Backend em Node.js/Express com:
 ## Diagrama de arquitetura
 ```mermaid
 graph TD
-  Frontend --> API[HTTP/WS API (Express App src/app.js)]
+  Frontend --> API["HTTP/WS API (Express App src/app.js)"]
   API -->|Routes| CTR[Controllers]
   CTR --> SRV[Services]
   SRV --> REP[Repositories]
-  SRV --> LLM[Gemini (Google Generative AI)]
-  SRV --> EMB[text-embedding-004 (768d)]
+  SRV --> LLM["Gemini (Google Generative AI)"]
+  SRV --> EMB["text-embedding-004 (768d)"]
   REP --> DB[(Supabase Postgres)]
-  DB --> RPCs[RPCs: search_docs_and_history, match_documents, insert_historico]
-  SRV --> WS[WebSocket Server (ws)]
+  DB --> RPCs["RPCs: search_docs_and_history, match_documents, insert_historico"]
+  SRV --> WS["WebSocket Server (ws)"]
 ```
 
 ## Diagrama RAG/Embeddings
