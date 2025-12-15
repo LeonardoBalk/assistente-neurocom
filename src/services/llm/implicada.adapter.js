@@ -23,7 +23,7 @@ export async function responderImplicada({ gemini, mensagem, contexto, historico
       apontamentos_nao_compreendidos: j.apontamentos_nao_compreendidos || [],
       limite: j.limite || { fora_de_escopo: false, observacao: "" },
       silencio: j.silencio || { sugerido: false, duracao_s: 0 },
-      posicao: j.posicao || String(posicao || "TU").toUpperCase(),
+      posicao: j.posicao || String(posicao || "VOCÊ").toUpperCase(),
       etica: j.etica || { tensoes: [], nota: "" },
       embedding,
     },

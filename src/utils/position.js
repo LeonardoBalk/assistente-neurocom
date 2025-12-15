@@ -1,7 +1,7 @@
 // normaliza a posição do interlocutor (TU, ELE, NOS)
 export function normalizarPosicao(p) {
-  const v = (p || "TU").toString().trim().toUpperCase();
-  if (["TU", "ELE", "NOS"].includes(v)) return v;
-  if (v === "NÓS" || v === "NOSSO" || v === "NOSSA") return "NOS";
-  return "TU";
+  const v = (p || "VOCÊ").toString().trim().toUpperCase();
+  if (["VOCÊ", "ELE", "NÓS"].includes(v)) return v;
+  if (v === "NÓS" || v === "NOSSO" || v === "NOSSA") return "NÓS";
+  return "VOCÊ";
 }
